@@ -1,13 +1,14 @@
 // Runs the lines of a console `bat` file on the main thread (SkyrimSE 1.6.x, Address Library).
 // `bat <file>` does not run its lines at once: it queues a message for the Console menu, and the lines run when the
 // UI processes that message - on the UI job thread while the game is running. A line that changes cells (coc, cow,
-// movetoqt, ...) then performs the whole load on that thread. Three crashes follow from it (2026-10-28, crash dumps +
-// Ghidra): the load start / end processes UI messages again on the same thread and its UIMessageQueue::ProcessCommands
-// destroys the bat message's data, so the loop reads the next line from a freed file stream; the main thread keeps
-// rendering the scene that is being unloaded; and menus are advanced and drawn by two threads at once.
+// movetoqt, ...) then performs the whole load on that thread: the load start / end processes UI messages again on the
+// same thread and its UIMessageQueue::ProcessCommands destroys the bat message's data, so the loop reads the next line
+// from a freed file stream and crashes (2026-10-28, crash dumps + Ghidra); the menus are also advanced and drawn by two
+// threads at once after such a load.
 // The plugin wraps the call in Console::ProcessMessage that starts the line loop: on the main thread it runs as
 // before; elsewhere it reads every line at once (the stream is still alive there) and queues one main-thread task
-// that runs them in order, the way the console runs a typed command.
+// that runs them in order the way the loop does - echoed to the console, compiled with the console's compiler and
+// run on the reference selected when the bat started.
 
 namespace
 {
@@ -40,14 +41,26 @@ namespace
 			buffer.fill(0);
 		}
 		const auto n = ++deferred;
+		const RE::RefHandle selected = a_selectedRef ? *a_selectedRef : 0;
 		logger::info("bat #{}: {} line(s) moved to the main thread"sv, n, lines.size());
-		SKSE::GetTaskInterface()->AddTask([lines = std::move(lines)]() {
+		SKSE::GetTaskInterface()->AddTask([lines = std::move(lines), selected, echo = a_printer != nullptr]() {
 			const auto log = RE::ConsoleLog::GetSingleton();
+			const auto factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::Script>();
 			for (const auto& line : lines) {
-				if (log) {
+				if (echo && log) {
 					log->Print(line.c_str());
 				}
-				RE::Console::ExecuteCommand(line.c_str());
+				const auto script = factory ? factory->Create() : nullptr;
+				if (!script) {
+					logger::error("no Script form: '{}' not run"sv, line);
+					continue;
+				}
+				RE::NiPointer<RE::TESObjectREFR> ref;  // looked up per line, as the loop does
+				RE::LookupReferenceByHandle(selected, ref);
+				RE::ScriptCompiler compiler;
+				script->SetCommand(line);
+				script->CompileAndRun(&compiler, ref.get(), RE::COMPILER_NAME::kSystemWindowCompiler);
+				delete script;
 			}
 		});
 	}
