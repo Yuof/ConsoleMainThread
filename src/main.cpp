@@ -1,14 +1,15 @@
-// Runs the lines of a console `bat` file on the main thread (SkyrimSE 1.6.x, Address Library).
-// `bat <file>` does not run its lines at once: it queues a message for the Console menu, and the lines run when the
-// UI processes that message - on the UI job thread while the game is running. A line that changes cells (coc, cow,
-// movetoqt, ...) then performs the whole load on that thread: the load start / end processes UI messages again on the
-// same thread and its UIMessageQueue::ProcessCommands destroys the bat message's data, so the loop reads the next line
-// from a freed file stream and crashes (2026-10-28, crash dumps + Ghidra); the menus are also advanced and drawn by two
-// threads at once after such a load.
-// The plugin wraps the call in Console::ProcessMessage that starts the line loop: on the main thread it runs as
-// before; elsewhere it reads every line at once (the stream is still alive there) and queues one main-thread task
-// that runs them in order the way the loop does - echoed to the console, compiled with the console's compiler and
-// run on the reference selected when the bat started.
+// Runs the lines of a console `bat` file as a main-thread task, outside the UI's message processing (SkyrimSE 1.6.x,
+// Address Library). `bat <file>` does not run its lines at once: it queues a message for the Console menu, and the
+// lines run while UI::ProcessMessages handles that message - holding the UI's message lock. A line that changes cells
+// (coc, cow, movetoqt, ...) then performs the whole load inside it (2026-10-28, crash dumps + Ghidra):
+//  - while the game runs, that is the UI job thread: the load start / end processes UI messages again on the same
+//    thread and its UIMessageQueue::ProcessCommands destroys the bat message's data, so the loop reads the next line
+//    from a freed file stream and crashes; the menus are also advanced and drawn by two threads at once afterwards;
+//  - with the console open it is the main thread: the load's end waits for the loading screen thread, which waits for
+//    the message lock the main thread holds - the game freezes.
+// The plugin wraps the call in Console::ProcessMessage that starts the line loop: it reads every line at once (the
+// stream is still alive there) and queues one main-thread task that runs them in order the way the loop does -
+// echoed to the console, compiled with the console's compiler and run on the reference selected when the bat started.
 
 namespace
 {
@@ -20,15 +21,11 @@ namespace
 	using LineLoop = void(void* a_stream, void* a_compiler, std::uint32_t* a_selectedRef, void* a_printer);
 	using ReadLine = std::int32_t(void* a_stream, char* a_buffer, std::uint32_t a_size);
 
-	REL::Relocation<LineLoop>  lineLoop;
 	DWORD                      mainThread = 0;
 	std::atomic<std::uint64_t> deferred{ 0 };
 
-	void LineLoopThunk(void* a_stream, void* a_compiler, std::uint32_t* a_selectedRef, void* a_printer)
+	void LineLoopThunk(void* a_stream, void*, std::uint32_t* a_selectedRef, void* a_printer)
 	{
-		if (GetCurrentThreadId() == mainThread) {
-			return lineLoop(a_stream, a_compiler, a_selectedRef, a_printer);
-		}
 		static REL::Relocation<ReadLine> readLine{ kReadLine };
 		std::vector<std::string> lines;
 		std::array<char, 0x104>  buffer{};
@@ -42,7 +39,8 @@ namespace
 		}
 		const auto n = ++deferred;
 		const RE::RefHandle selected = a_selectedRef ? *a_selectedRef : 0;
-		logger::info("bat #{}: {} line(s) moved to the main thread"sv, n, lines.size());
+		logger::info("bat #{}: {} line(s) moved to the main thread (read on the {} thread)"sv, n, lines.size(),
+			GetCurrentThreadId() == mainThread ? "main" : "UI job");
 		SKSE::GetTaskInterface()->AddTask([lines = std::move(lines), selected, echo = a_printer != nullptr]() {
 			const auto log = RE::ConsoleLog::GetSingleton();
 			const auto factory = RE::IFormFactory::GetConcreteFormFactoryByType<RE::Script>();
@@ -77,7 +75,7 @@ namespace
 			return "the call there is not the bat line loop"sv;
 		}
 		SKSE::AllocTrampoline(14);
-		lineLoop = SKSE::GetTrampoline().write_call<5>(site, LineLoopThunk);
+		SKSE::GetTrampoline().write_call<5>(site, LineLoopThunk);
 		return std::nullopt;
 	}
 }
@@ -96,7 +94,7 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 	if (const auto why = Hook()) {
 		logger::error("self-check failed ({}): inactive"sv, *why);
 	} else {
-		logger::info("self-check passed, bat lines off the main thread are moved to it"sv);
+		logger::info("self-check passed, bat lines run as a main-thread task"sv);
 	}
 	return true;
 }
