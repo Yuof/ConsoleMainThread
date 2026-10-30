@@ -5,13 +5,13 @@
 //
 // Cell changes (coc, coe, cow): the handlers call PlayerCharacter::CenterOnCell_Impl right there, so the whole switch -
 // the old cell's teardown, ShadowSceneNode::SetPortalGraph, the light queues - runs on that worker while the main
-// thread renders the frame (2026-10-24 / 2026-10-30, crash dumps + Ghidra): SkyrimSE+14EAFFA (an effect shape drawn
+// thread renders the frame (crash dumps + Ghidra): SkyrimSE+14EAFFA (an effect shape drawn
 // with a light the switch had just freed), SkyrimSE+14A6BBA (ShadowSceneNode::AccumulateLight walking a room's light
 // list the switch emptied mid-walk). Door travel runs the same switch on the main thread and shows neither. Off the
 // main thread the handlers' call of CenterOnCell_Impl is queued; on the main thread (console open, doors) it runs as is.
 //
 // Bat files: `bat <file>` queues a message for the Console menu, and the lines run while UI::ProcessMessages handles
-// it - holding the UI's message lock. A line that changes cells performs the whole load inside it (2026-10-28):
+// it - holding the UI's message lock. A line that changes cells performs the whole load inside it:
 //  - while the game runs, that is the UI job thread: the load start / end processes UI messages again on the same
 //    thread and its UIMessageQueue::ProcessCommands destroys the bat message's data, so the loop reads the next line
 //    from a freed file stream and crashes; the menus are also advanced and drawn by two threads at once afterwards;
