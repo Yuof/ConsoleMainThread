@@ -1,6 +1,6 @@
 # Console Main Thread
 
-SKSE plugin for Skyrim Special Edition (Anniversary Edition runtime). Runs the console's cell changes (`coc`, `coe`,
+SKSE plugin for Skyrim Special Edition: SE 1.5.97 and AE 1.6.317-1.7.104, one DLL (tested on 1.6.1170). Runs the console's cell changes (`coc`, `coe`,
 `cow`) and console batch files (`bat`) on the main thread, the way travel through a door does. Fixes, on 1.6.1170:
 
 - `SkyrimSE.exe+14EAFFA` (`BSEffectShader::SetupGeometry`, a light that no longer exists) and `SkyrimSE.exe+14A6BBA`
