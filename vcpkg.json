@@ -1,7 +1,7 @@
 {
-  "name": "batmainthreadfix",
-  "version-string": "1.0.0",
-  "description": "SKSE plugin: runs the lines of a console bat file on the main thread.",
+  "name": "consolemainthread",
+  "version-string": "2.0.0",
+  "description": "SKSE plugin: runs console cell changes (coc, coe, cow) and bat files on the main thread.",
   "license": "GPL-3.0-or-later",
   "dependencies": [
     "directxmath",

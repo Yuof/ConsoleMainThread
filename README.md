@@ -1,32 +1,36 @@
-# Disabled Attacker Crash Fix
+# Console Main Thread
 
-SKSE plugin for Skyrim Special Edition (Anniversary Edition runtime) with
-[Precision - Accurate Melee Collisions](https://www.nexusmods.com/skyrimspecialedition/mods/72347) 2.0.6. Fixes a crash
-when an actor is disabled or unloaded in the middle of a melee swing (a script, a cell change): `SkyrimSE.exe+070DB20`
-on 1.6.1170, under `Actor::CalculateCurrentHitTargetForWeaponSwing`, with Precision's `PendingHit::Run` on the stack.
+SKSE plugin for Skyrim Special Edition (Anniversary Edition runtime). Runs the console's cell changes (`coc`, `coe`,
+`cow`) and console batch files (`bat`) on the main thread, the way travel through a door does. Fixes, on 1.6.1170:
 
-Precision queues a melee hit at its contact and processes it on a later update. An attacker disabled in between has no
-AI process any more; Precision passes it to the game's hit-target function, which reads through the missing process,
-and its hitstop reads the process too. The plugin wraps `PendingHit::Run` and drops such a hit - there is no attacker
-left to apply it. Every other hit runs unchanged.
+- `SkyrimSE.exe+14EAFFA` (`BSEffectShader::SetupGeometry`, a light that no longer exists) and `SkyrimSE.exe+14A6BBA`
+  (`ShadowSceneNode::AccumulateLight`, a room's light list emptied while it is read) after a `coc` / `coe` / `cow` that
+  comes from a script, a batch file or a tool rather than the open console;
+- crashes in the interface after a batch file that changes cells (a freed file stream, menus advanced and drawn by
+  two threads at once - with TrueHUD that is `TrueHUDMenu::AdvanceMovie`), and the freeze when such a batch file runs
+  with the console open.
 
-The same check is proposed upstream: https://github.com/ersh1/Precision/pull/6. Until a Precision release has it, this
-plugin covers the released 2.0.6 build only: it checks Precision.dll's build stamp and the function's first bytes and
-stays inactive (with a line in `DisabledAttackerCrashFix.log`) for any other build.
+On this runtime a console command that does not come from the open console runs on a job worker thread, and the cell
+change starts right there: the old cell is torn down, the scene's portal graph and light lists swapped, while the main
+thread is still drawing the frame. A batch file runs its lines inside the interface's message processing. The plugin
+queues both and runs them on the main thread at the start of its next loop; a `coc` typed into the open console is
+already there and runs unchanged.
+
+`ConsoleMainThread.log` lists every command and batch file it moved and when it ran. The plugin checks each code site
+it patches and stays inactive, with a line in its log, on a build where they do not match.
 
 ## Requirements
 - [SKSE64](https://skse.silverlock.org/)
 - [Address Library for SKSE Plugins](https://www.nexusmods.com/skyrimspecialedition/mods/32444)
-- Precision - Accurate Melee Collisions 2.0.6
 
 ## Building
 Visual Studio 2022 or newer (C++; the preset uses the newest one installed), CMake 3.24+, [vcpkg](https://github.com/microsoft/vcpkg) with `VCPKG_ROOT` set.
 
 ```
 git clone --recurse-submodules <this repo>
-cd DisabledAttackerCrashFix
+cd ConsoleMainThread
 cmake --preset release
-cmake --build --preset release
+cmake --build build --config Release
 ```
 
 ## License

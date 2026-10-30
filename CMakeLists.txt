@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(
-	BatMainThreadFix
-	VERSION 1.0.0
+	ConsoleMainThread
+	VERSION 2.0.0
 	LANGUAGES CXX
 )
 
