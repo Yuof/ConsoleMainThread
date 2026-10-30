@@ -43,8 +43,9 @@ namespace
 		Site{ REL::RelocationID(22401, 22876), "cow"sv },  // CenterOnWorld: (player, nullptr, cell)
 	};
 
-	// Console::ProcessMessage = slot 4 of Console's vtable; its own id (442669) is missing from the AE 1.6.317-1.6.659
-	// Address Library databases, the vtable's is in all of them.
+	// Console::ProcessMessage: its own id where the Address Library has one (SE, AE 1.6.1130+; 442669 is missing from
+	// the 1.6.317-1.6.659 databases), else slot 4 of Console's vtable - which another plugin may have replaced by then.
+	constexpr REL::RelocationID kProcessMessage{ 50155, 442669 };
 	constexpr REL::RelocationID kConsoleVtbl{ 268119, 215002 };
 	constexpr REL::RelocationID kLineLoop{ 21417, 21891 };         // runs every line of a bat stream
 	constexpr REL::RelocationID kReadLine{ 67711, 69036 };         // stream -> next line, 0 at the end
@@ -192,7 +193,20 @@ namespace
 			}
 		}
 		p.travel = std::ranges::all_of(sites, [](const auto& s) { return s.has_value(); });
-		const auto processMessage = reinterpret_cast<const std::uintptr_t*>(kConsoleVtbl.address())[4];
+		const auto slot4 = reinterpret_cast<const std::uintptr_t*>(kConsoleVtbl.address())[4];
+		const auto processMessage = REL::Module::IsSE() || REL::Module::get().version() >= SKSE::RUNTIME_SSE_1_6_1130 ?
+		                                kProcessMessage.address() :
+		                                slot4;
+		if (slot4 != processMessage) {
+			HMODULE owner = nullptr;
+			char    name[MAX_PATH] = "?";
+			if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					reinterpret_cast<LPCSTR>(slot4), &owner) && owner) {
+				GetModuleFileNameA(owner, name, MAX_PATH);
+			}
+			logger::info("Console::ProcessMessage is replaced in the menu's vtable by {} (the bat hook sits in the game's own function)"sv,
+				std::string_view(name).substr(std::string_view(name).find_last_of('\\') + 1));
+		}
 		const auto bat = FindCall(processMessage, kLineLoop.address());
 		if (!bat) {
 			p.why += "Console::ProcessMessage has no call of the bat line loop; ";
