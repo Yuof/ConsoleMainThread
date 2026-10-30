@@ -1,4 +1,4 @@
-// Console Main Thread (SkyrimSE 1.6.x, Address Library): runs the console's cell changes and `bat` files on the main
+// Console Main Thread (Skyrim SE 1.5.97 and AE, Address Library): runs the console's cell changes and `bat` files on the main
 // thread, at the start of its next loop (the main loop's call of Main::OnIdle). On 1.6.1170 a console command from a
 // script, a bat file or a tool does not run on the main thread: SKSE's task queue and the console's UI message
 // processing are drained by BSJobs worker threads (and an SKSE task is no way back to the main thread either).
@@ -24,26 +24,30 @@
 
 namespace
 {
-	constexpr REL::ID        kMainLoop{ 36544 };
-	constexpr std::uintptr_t kOnIdleCall = 0x160;  // MainLoop's call of Main::OnIdle (36564)
+	// SE 1.5.97 / AE ids; read from 1.5.97, 1.6.1170 and 1.7.104. The main loop's call of Main::OnIdle sits at the same
+	// offset in every build (other plugins hook it too, so its target is not checked); the other call sites are found
+	// by their target inside the function, as their offsets differ between builds (Console::ProcessMessage's call of
+	// the bat line loop: +0x69F on 1.6.1170, +0x6BF on 1.7.104, +0x3E6 on 1.5.97).
+	constexpr REL::RelocationID kMainLoop{ 35551, 36544 };
+	constexpr REL::VariantOffset kOnIdleCall{ 0x11F, 0x160, 0 };
 
-	constexpr REL::ID        kCenterOnCellImpl{ 40437 };  // PlayerCharacter::CenterOnCell_Impl(name, cell)
+	constexpr REL::RelocationID kCenterOnCellImpl{ 39365, 40437 };  // PlayerCharacter::CenterOnCell_Impl(name, cell)
 	struct Site
 	{
-		REL::ID          handler;
-		std::uintptr_t   offset;  // the handler's call of CenterOnCell_Impl
-		std::string_view command;
+		REL::RelocationID handler;
+		std::string_view  command;
 	};
 	constexpr std::array kSites{
-		Site{ REL::ID(22873), 0x5B, "coc"sv },   // ConsoleFunc CenterOnCell: (player, cell name, nullptr)
-		Site{ REL::ID(22875), 0x109, "coe"sv },  // CenterOnExterior: (player, nullptr, cell)
-		Site{ REL::ID(22876), 0x104, "cow"sv },  // CenterOnWorld: (player, nullptr, cell)
+		Site{ REL::RelocationID(22398, 22873), "coc"sv },  // ConsoleFunc CenterOnCell: (player, cell name, nullptr)
+		Site{ REL::RelocationID(22400, 22875), "coe"sv },  // CenterOnExterior: (player, nullptr, cell)
+		Site{ REL::RelocationID(22401, 22876), "cow"sv },  // CenterOnWorld: (player, nullptr, cell)
 	};
 
-	constexpr REL::ID        kProcessMessage{ 442669 };  // Console::ProcessMessage
-	constexpr std::uintptr_t kLineLoopCall = 0x69F;      // its call of the bat line loop
-	constexpr REL::ID        kLineLoop{ 21891 };         // runs every line of a bat stream
-	constexpr REL::ID        kReadLine{ 69036 };         // stream -> next line, 0 at the end
+	// Console::ProcessMessage = slot 4 of Console's vtable; its own id (442669) is missing from the AE 1.6.317-1.6.659
+	// Address Library databases, the vtable's is in all of them.
+	constexpr REL::RelocationID kConsoleVtbl{ 268119, 215002 };
+	constexpr REL::RelocationID kLineLoop{ 21417, 21891 };         // runs every line of a bat stream
+	constexpr REL::RelocationID kReadLine{ 67711, 69036 };         // stream -> next line, 0 at the end
 
 	using OnIdle = void(void*);
 	using CenterOnCell = bool(RE::PlayerCharacter*, const char*, RE::TESObjectCELL*);
@@ -149,28 +153,64 @@ namespace
 		return a_site + 5 + *reinterpret_cast<const std::int32_t*>(code + 1);
 	}
 
-	template <std::size_t... I>
-	std::optional<std::string> Hook(std::index_sequence<I...>)
+	// The first call of a_target inside the function at a_function, up to its int3 padding (or a_max bytes).
+	std::optional<std::uintptr_t> FindCall(std::uintptr_t a_function, std::uintptr_t a_target, std::size_t a_max = 0x1000)
 	{
-		const auto loop = kMainLoop.address() + kOnIdleCall;
-		if (!CallTarget(loop)) {
-			return "no call at MainLoop+0x160"s;
-		}
-		for (const auto& s : kSites) {
-			if (CallTarget(s.handler.address() + s.offset) != kCenterOnCellImpl.address()) {
-				return fmt::format("the {} handler does not call CenterOnCell_Impl at +0x{:X}", s.command, s.offset);
+		const auto* code = reinterpret_cast<const std::uint8_t*>(a_function);
+		for (std::size_t i = 0; i + 5 <= a_max; ++i) {
+			if (code[i] == 0xCC && code[i + 1] == 0xCC && code[i + 2] == 0xCC) {
+				break;
+			}
+			if (CallTarget(a_function + i) == a_target) {
+				return a_function + i;
 			}
 		}
-		const auto bat = kProcessMessage.address() + kLineLoopCall;
-		if (CallTarget(bat) != kLineLoop.address()) {
-			return "Console::ProcessMessage+0x69F is not a call of the bat line loop"s;
+		return std::nullopt;
+	}
+
+	struct Parts
+	{
+		bool        travel = false;
+		bool        bat = false;
+		std::string why;  // what failed, for the log
+	};
+
+	template <std::size_t... I>
+	Parts Hook(std::index_sequence<I...>)
+	{
+		Parts      p;
+		const auto loop = kMainLoop.address() + kOnIdleCall.offset();
+		if (!CallTarget(loop)) {
+			p.why = "no call at the main loop's Main::OnIdle site";
+			return p;  // no way to the main thread: nothing else is patched
+		}
+		std::array<std::optional<std::uintptr_t>, kSites.size()> sites{};
+		for (std::size_t k = 0; k < kSites.size(); ++k) {
+			sites[k] = FindCall(kSites[k].handler.address(), kCenterOnCellImpl.address());
+			if (!sites[k]) {
+				p.why += fmt::format("the {} handler has no call of CenterOnCell_Impl; ", kSites[k].command);
+			}
+		}
+		p.travel = std::ranges::all_of(sites, [](const auto& s) { return s.has_value(); });
+		const auto processMessage = reinterpret_cast<const std::uintptr_t*>(kConsoleVtbl.address())[4];
+		const auto bat = FindCall(processMessage, kLineLoop.address());
+		if (!bat) {
+			p.why += "Console::ProcessMessage has no call of the bat line loop; ";
+		}
+		p.bat = bat.has_value();
+		if (!p.travel && !p.bat) {
+			return p;
 		}
 		SKSE::AllocTrampoline(14 * (2 + kSites.size()));
 		auto& t = SKSE::GetTrampoline();
 		onIdle = t.write_call<5>(loop, OnIdleThunk);
-		(t.write_call<5>(kSites[I].handler.address() + kSites[I].offset, CenterOnCellThunk<I>), ...);
-		t.write_call<5>(bat, LineLoopThunk);
-		return std::nullopt;
+		if (p.travel) {
+			(t.write_call<5>(*sites[I], CenterOnCellThunk<I>), ...);
+		}
+		if (p.bat) {
+			t.write_call<5>(*bat, LineLoopThunk);
+		}
+		return p;
 	}
 }
 
@@ -185,10 +225,15 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 	SKSE::Init(a_skse, { .log = true });
 	mainThread = GetCurrentThreadId();  // plugins load on the main thread
 	logger::info("{} v{} on {}"sv, Plugin::NAME, Plugin::VERSION.string(), REL::Module::get().version().string());
-	if (const auto why = Hook(std::make_index_sequence<kSites.size()>{})) {
-		logger::error("self-check failed ({}): inactive"sv, *why);
+	const auto p = Hook(std::make_index_sequence<kSites.size()>{});
+	if (!p.travel && !p.bat) {
+		logger::error("self-check failed ({}): inactive"sv, p.why);
 	} else {
-		logger::info("self-check passed: coc / coe / cow off the main thread and bat lines run on the main thread"sv);
+		if (!p.why.empty()) {
+			logger::warn("self-check: {}that part stays off"sv, p.why);
+		}
+		logger::info("self-check passed: {}{}{} run on the main thread"sv, p.travel ? "coc / coe / cow off the main thread"sv : ""sv,
+			p.travel && p.bat ? " and "sv : ""sv, p.bat ? "bat lines"sv : ""sv);
 	}
 	return true;
 }
